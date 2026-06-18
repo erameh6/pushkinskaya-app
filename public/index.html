@@ -34,7 +34,7 @@
   main{flex:1;padding:18px 20px 40px}
   .hidden{display:none}
 
-  #video,#snap{width:100%;border-radius:12px;background:#000;aspect-ratio:3/4;object-fit:cover;border:1px solid var(--edge)}
+  #video,#snap,#uploadPreview{width:100%;border-radius:12px;background:#000;aspect-ratio:3/4;object-fit:cover;border:1px solid var(--edge)}
   .controls{display:flex;gap:10px;margin-top:12px}
   button.act{flex:1;background:var(--gold);color:#0d0d0f;border:none;padding:13px;border-radius:10px;font-family:'Inter';font-weight:600;font-size:14px;cursor:pointer;letter-spacing:.02em}
   button.act.ghost{background:none;color:var(--gold);border:1px solid var(--gold-soft)}
@@ -92,10 +92,15 @@
   <main>
     <section id="tab-cam">
       <video id="video" autoplay playsinline muted></video>
+      <img id="uploadPreview" class="hidden" alt="" />
       <canvas id="snap" class="hidden"></canvas>
       <div class="controls">
         <button class="act" id="btnStart" onclick="startCamera()" data-i="camStart"></button>
         <button class="act" id="btnShot" onclick="identify()" disabled data-i="identify"></button>
+      </div>
+      <div class="controls" style="margin-top:8px">
+        <button class="act ghost" onclick="document.getElementById('uploadInput').click()" data-i="uploadBtn"></button>
+        <input type="file" id="uploadInput" accept="image/*" class="hidden" onchange="identifyFromUpload(event)" />
       </div>
       <div class="controls" style="margin-top:8px">
         <select id="modeSel"></select>
@@ -131,6 +136,7 @@ const T = {
     tagline:'Наведите камеру на здание или памятник — и узнайте его историю',
     navCam:'Камера', navList:'Все объекты', navAbout:'О маршруте',
     camStart:'Включить камеру', camOn:'Камера включена', identify:'Определить',
+    uploadBtn:'Загрузить фото с устройства',
     camHint:'Совет: снимайте фасад целиком при дневном свете. Геолокация ускоряет определение.',
     modeAuto:'Режим: GPS + фото (на улице)', modeImage:'Режим: только фото (для теста)', modeGps:'Режим: только GPS',
     gpsNone:'Геолокация: не запрошена', gpsOk:'Геолокация', gpsDenied:'Геолокация: отклонена (определение по фото)',
@@ -151,6 +157,7 @@ const T = {
     tagline:'Point your camera at a building or monument to learn its history',
     navCam:'Camera', navList:'All sites', navAbout:'About',
     camStart:'Enable camera', camOn:'Camera on', identify:'Identify',
+    uploadBtn:'Upload photo from device',
     camHint:'Tip: capture the whole facade in daylight. Location speeds up identification.',
     modeAuto:'Mode: GPS + photo (on the street)', modeImage:'Mode: photo only (for testing)', modeGps:'Mode: GPS only',
     gpsNone:'Location: not requested', gpsOk:'Location', gpsDenied:'Location: denied (using photo)',
@@ -247,16 +254,46 @@ async function getSignatures(){
 async function identify(){
   const v=document.getElementById('video');
   if(!v.videoWidth){ alert(t('camStartFirst')); return; }
+  // hide any previous upload preview; we're using the live camera
+  document.getElementById('uploadPreview').classList.add('hidden');
+  document.getElementById('video').classList.remove('hidden');
+  await runRecognition(v);
+}
+
+// Identify from a photo the user picks off their device.
+async function identifyFromUpload(event){
+  const file=event.target.files && event.target.files[0];
+  if(!file) return;
+  const box=document.getElementById('resultBox');
+
+  // Show the chosen photo in place of the camera feed.
+  const preview=document.getElementById('uploadPreview');
+  const url=URL.createObjectURL(file);
+  await new Promise((res,rej)=>{ preview.onload=res; preview.onerror=rej; preview.src=url; });
+  preview.classList.remove('hidden');
+  document.getElementById('video').classList.add('hidden');
+
+  // If we're in a GPS-using mode but have no fix yet (camera never started),
+  // try to get one so location can still contribute to the score.
+  const mode=document.getElementById('modeSel').value;
+  if(mode!=='image' && !lastPos) requestGps();
+
+  await runRecognition(preview);
+  event.target.value=''; // reset so the same file can be re-picked
+}
+
+// Shared recognition: takes any image source (video frame or <img>) and scores it.
+async function runRecognition(sourceEl){
   const box=document.getElementById('resultBox');
   const mode=document.getElementById('modeSel').value;
 
-  // 1) Run MobileNet on the current camera frame to get its feature embedding.
+  // 1) Run MobileNet on the source to get its feature embedding.
   let queryEmbedding=null;
   if(mode!=='gps'){
     box.innerHTML='<p class="hint">'+t('modelLoading')+'</p>';
     try{
-      await Embed.load(()=>{});            // ensures model is ready
-      queryEmbedding=await Embed.embed(v); // embedding straight from the <video>
+      await Embed.load(()=>{});
+      queryEmbedding=await Embed.embed(sourceEl);
     }catch(e){
       box.innerHTML='<p class="hint">'+t('modelError')+'</p>'; return;
     }
@@ -276,7 +313,7 @@ async function identify(){
     let conf;
     if(imageScore!=null && gpsMeters!=null){
       const gpsConf=Math.max(0,1-gpsMeters/150);
-      conf=0.65*imageScore+0.35*gpsConf;   // image weighted higher than GPS now
+      conf=0.65*imageScore+0.35*gpsConf;   // image weighted higher than GPS
     } else if(imageScore!=null){ conf=imageScore; }
     else if(gpsMeters!=null){ conf=Math.max(0,1-gpsMeters/150); }
     else conf=0;
